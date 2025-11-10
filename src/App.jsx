@@ -2,6 +2,23 @@ import { useEffect, useMemo, useState } from "react";
 
 const API_BASE = import.meta.env.VITE_BACKEND_URL || "";
 
+async function extractErrorMessage(res) {
+  try {
+    const body = await res.json();
+    const d = body?.detail;
+    if (!d) return body?.message || "Request failed";
+    if (typeof d === "string") return d;
+    if (Array.isArray(d)) {
+      // FastAPI validation errors array
+      return d.map((e) => e?.msg || JSON.stringify(e)).join("; ");
+    }
+    if (typeof d === "object") return d.message || JSON.stringify(d);
+    return "Request failed";
+  } catch (e) {
+    return `Request failed (${res.status})`;
+  }
+}
+
 function useAuth() {
   const [token, setToken] = useState(localStorage.getItem("token"));
   const [user, setUser] = useState(() => {
@@ -50,7 +67,7 @@ function Login({ onLogin, switchToSignup }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
-      if (!res.ok) throw new Error((await res.json()).detail || "Login failed");
+      if (!res.ok) throw new Error(await extractErrorMessage(res));
       const data = await res.json();
       onLogin(data.access_token, data.user);
     } catch (err) {
@@ -88,8 +105,8 @@ function Signup({ onLogin, switchToLogin }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, email, address, password }),
       });
+      if (!res.ok) throw new Error(await extractErrorMessage(res));
       const body = await res.json();
-      if (!res.ok) throw new Error(body.detail || "Signup failed");
       onLogin(body.access_token, body.user);
     } catch (err) {
       setError(err.message);
@@ -124,8 +141,11 @@ function ChangePassword({ token }) {
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ old_password: oldPassword, new_password: newPassword })
     });
-    const body = await res.json();
-    setMsg(res.ok ? "Password updated" : body.detail || "Error");
+    if (res.ok) {
+      setMsg("Password updated");
+    } else {
+      setMsg(await extractErrorMessage(res));
+    }
   };
   return (
     <form onSubmit={submit} className="flex gap-2 items-end flex-wrap">
