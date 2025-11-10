@@ -6,16 +6,27 @@ async function extractErrorMessage(res) {
   try {
     const body = await res.json();
     const d = body?.detail;
-    if (!d) return body?.message || "Request failed";
+    if (!d) return body?.message || `Request failed (${res.status})`;
     if (typeof d === "string") return d;
     if (Array.isArray(d)) {
-      // FastAPI validation errors array
       return d.map((e) => e?.msg || JSON.stringify(e)).join("; ");
     }
     if (typeof d === "object") return d.message || JSON.stringify(d);
-    return "Request failed";
+    return `Request failed (${res.status})`;
   } catch (e) {
     return `Request failed (${res.status})`;
+  }
+}
+
+async function safeFetch(url, options, retry = 1) {
+  try {
+    return await fetch(url, options);
+  } catch (e) {
+    if (retry > 0) {
+      await new Promise((r) => setTimeout(r, 700));
+      return safeFetch(url, options, retry - 1);
+    }
+    throw e;
   }
 }
 
@@ -43,6 +54,39 @@ function useAuth() {
   return { token, user, login, logout };
 }
 
+function ConnectivityBadge() {
+  const [status, setStatus] = useState("checking");
+  const [msg, setMsg] = useState("");
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const r = await safeFetch(`${API_BASE}/test`, { method: "GET" });
+        if (!mounted) return;
+        if (r.ok) {
+          const b = await r.json();
+          setStatus("ok");
+          setMsg("Backend connected");
+        } else {
+          setStatus("warn");
+          setMsg(`Backend reachable but returned ${r.status}`);
+        }
+      } catch (e) {
+        if (!mounted) return;
+        setStatus("err");
+        setMsg("Cannot reach backend. Check your network or try again.");
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+  const color = status === "ok" ? "bg-green-100 text-green-800" : status === "warn" ? "bg-yellow-100 text-yellow-800" : status === "checking" ? "bg-gray-100 text-gray-700" : "bg-red-100 text-red-800";
+  return (
+    <div className={`mx-auto max-w-5xl px-4 pt-3`}>
+      <div className={`inline-block text-sm px-3 py-2 rounded ${color}`}>API status: {status === "checking" ? "Checking..." : msg}</div>
+    </div>
+  );
+}
+
 function Header({ user, onLogout }) {
   if (!user) return null;
   return (
@@ -62,7 +106,7 @@ function Login({ onLogin, switchToSignup }) {
     e.preventDefault();
     setError("");
     try {
-      const res = await fetch(`${API_BASE}/auth/login`, {
+      const res = await safeFetch(`${API_BASE}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
@@ -71,7 +115,7 @@ function Login({ onLogin, switchToSignup }) {
       const data = await res.json();
       onLogin(data.access_token, data.user);
     } catch (err) {
-      setError(err.message);
+      setError(err.message === "Failed to fetch" ? "Cannot reach API. Please refresh and try again." : err.message);
     }
   };
 
@@ -100,7 +144,7 @@ function Signup({ onLogin, switchToLogin }) {
     e.preventDefault();
     setError("");
     try {
-      const res = await fetch(`${API_BASE}/auth/signup`, {
+      const res = await safeFetch(`${API_BASE}/auth/signup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, email, address, password }),
@@ -109,7 +153,7 @@ function Signup({ onLogin, switchToLogin }) {
       const body = await res.json();
       onLogin(body.access_token, body.user);
     } catch (err) {
-      setError(err.message);
+      setError(err.message === "Failed to fetch" ? "Cannot reach API. Please refresh and try again." : err.message);
     }
   };
 
@@ -136,15 +180,19 @@ function ChangePassword({ token }) {
   const submit = async (e) => {
     e.preventDefault();
     setMsg("");
-    const res = await fetch(`${API_BASE}/auth/password`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword })
-    });
-    if (res.ok) {
-      setMsg("Password updated");
-    } else {
-      setMsg(await extractErrorMessage(res));
+    try {
+      const res = await safeFetch(`${API_BASE}/auth/password`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ old_password: oldPassword, new_password: newPassword })
+      });
+      if (res.ok) {
+        setMsg("Password updated");
+      } else {
+        setMsg(await extractErrorMessage(res));
+      }
+    } catch (e) {
+      setMsg("Cannot reach API. Please try again.");
     }
   };
   return (
@@ -171,19 +219,19 @@ function AdminView({ token }) {
   const [sort, setSort] = useState({ by: "name", order: "asc" });
 
   const fetchStats = async () => {
-    const r = await fetch(`${API_BASE}/admin/dashboard`, { headers: { Authorization: `Bearer ${token}` } });
+    const r = await safeFetch(`${API_BASE}/admin/dashboard`, { headers: { Authorization: `Bearer ${token}` } });
     if (r.ok) setStats(await r.json());
   };
 
   const fetchUsers = async () => {
     const params = new URLSearchParams({ ...filters, sort_by: sort.by, order: sort.order });
-    const r = await fetch(`${API_BASE}/admin/users?${params.toString()}`, { headers: { Authorization: `Bearer ${token}` } });
+    const r = await safeFetch(`${API_BASE}/admin/users?${params.toString()}`, { headers: { Authorization: `Bearer ${token}` } });
     if (r.ok) setUsers(await r.json());
   };
 
   const fetchStores = async () => {
     const params = new URLSearchParams({ name: filters.name, email: filters.email, address: filters.address, sort_by: sort.by, order: sort.order });
-    const r = await fetch(`${API_BASE}/admin/stores?${params.toString()}`, { headers: { Authorization: `Bearer ${token}` } });
+    const r = await safeFetch(`${API_BASE}/admin/stores?${params.toString()}`, { headers: { Authorization: `Bearer ${token}` } });
     if (r.ok) setStores(await r.json());
   };
 
@@ -257,14 +305,14 @@ function StoresList({ token }) {
 
   const fetchStores = async () => {
     const params = new URLSearchParams({ ...filters, sort_by: sort.by, order: sort.order });
-    const r = await fetch(`${API_BASE}/stores?${params.toString()}`, { headers: { Authorization: `Bearer ${token}` } });
+    const r = await safeFetch(`${API_BASE}/stores?${params.toString()}`, { headers: { Authorization: `Bearer ${token}` } });
     if (r.ok) setStores(await r.json());
   };
 
   useEffect(() => { fetchStores(); }, [JSON.stringify(filters), JSON.stringify(sort)]);
 
   const rate = async (id, score) => {
-    const r = await fetch(`${API_BASE}/stores/${id}/rating`, {
+    const r = await safeFetch(`${API_BASE}/stores/${id}/rating`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ score })
@@ -323,7 +371,7 @@ function StoresList({ token }) {
 function OwnerDashboard({ token }) {
   const [data, setData] = useState([]);
   const load = async () => {
-    const r = await fetch(`${API_BASE}/owner/dashboard`, { headers: { Authorization: `Bearer ${token}` } });
+    const r = await safeFetch(`${API_BASE}/owner/dashboard`, { headers: { Authorization: `Bearer ${token}` } });
     if (r.ok) setData(await r.json());
   };
   useEffect(() => { load(); }, []);
@@ -359,6 +407,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-50">
+      <ConnectivityBadge />
       <Header user={user} onLogout={logout} />
       <div className="max-w-5xl mx-auto p-4">
         {!user && (
